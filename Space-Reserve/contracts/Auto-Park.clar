@@ -10,6 +10,9 @@
 (define-constant MAX-PARKING-FEE u10000000) ;; Maximum fee in microSTX
 (define-constant RESERVATION-TIMEOUT-BLOCKS u144) ;; ~24 hours at 10min blocks
 (define-constant DISPUTE-WINDOW-BLOCKS u1008) ;; ~1 week for disputes
+(define-constant MAX-SPOT-ID u999999) ;; Maximum spot ID
+(define-constant MAX-RESERVATION-ID u999999) ;; Maximum reservation ID
+(define-constant MAX-DISPUTE-ID u999999) ;; Maximum dispute ID
 
 ;; Error codes
 (define-constant ERR-NOT-AUTHORIZED (err u401))
@@ -26,6 +29,7 @@
 (define-constant ERR-INVALID-STATUS (err u418))
 (define-constant ERR-ALREADY-RATED (err u419))
 (define-constant ERR-INVALID-RATING (err u420))
+(define-constant ERR-INVALID-INPUT (err u421))
 
 ;; DATA STRUCTURES
 
@@ -117,6 +121,51 @@
 (define-data-var total-reservations uint u0)
 (define-data-var platform-earnings uint u0)
 
+;; INPUT VALIDATION FUNCTIONS
+
+;; Validate spot ID
+(define-private (is-valid-spot-id (spot-id uint))
+  (and (> spot-id u0) (<= spot-id MAX-SPOT-ID))
+)
+
+;; Validate reservation ID
+(define-private (is-valid-reservation-id (reservation-id uint))
+  (and (> reservation-id u0) (<= reservation-id MAX-RESERVATION-ID))
+)
+
+;; Validate dispute ID
+(define-private (is-valid-dispute-id (dispute-id uint))
+  (and (> dispute-id u0) (<= dispute-id MAX-DISPUTE-ID))
+)
+
+;; Validate location string
+(define-private (is-valid-location (location (string-ascii 100)))
+  (> (len location) u0)
+)
+
+;; Validate rating
+(define-private (is-valid-rating (rating uint))
+  (and (>= rating u1) (<= rating u5))
+)
+
+;; Validate status
+(define-private (is-valid-status (status uint))
+  (<= status STATUS-MAINTENANCE)
+)
+
+;; Validate reason string
+(define-private (is-valid-reason (reason (string-ascii 200)))
+  (> (len reason) u0)
+)
+
+;; Validate comment string
+(define-private (is-valid-comment (comment (optional (string-ascii 200))))
+  (match comment
+    some-comment (> (len some-comment) u0)
+    true
+  )
+)
+
 ;; UTILITY FUNCTIONS
 
 ;; Calculate platform fee
@@ -162,6 +211,8 @@
     (spot-id (var-get next-spot-id))
     (current-time (get-current-time))
   )
+    ;; Input validation
+    (asserts! (is-valid-location location) ERR-INVALID-INPUT)
     (asserts! (and (>= hourly-rate MIN-PARKING-FEE) (<= hourly-rate MAX-PARKING-FEE)) ERR-INVALID-AMOUNT)
     
     ;; Create the parking spot
@@ -216,50 +267,62 @@
   (location (optional (string-ascii 100)))
   (hourly-rate (optional uint))
 )
-  (match (map-get? parking-spots { spot-id: spot-id })
-    spot
-    (begin
-      (asserts! (is-eq (get owner spot) tx-sender) ERR-NOT-AUTHORIZED)
-      
-      (let (
-        (new-location (default-to (get location spot) location))
-        (new-rate (default-to (get hourly-rate spot) hourly-rate))
-      )
-        (asserts! (and (>= new-rate MIN-PARKING-FEE) (<= new-rate MAX-PARKING-FEE)) ERR-INVALID-AMOUNT)
+  (begin
+    ;; Input validation
+    (asserts! (is-valid-spot-id spot-id) ERR-INVALID-INPUT)
+    
+    (match (map-get? parking-spots { spot-id: spot-id })
+      spot
+      (begin
+        (asserts! (is-eq (get owner spot) tx-sender) ERR-NOT-AUTHORIZED)
         
-        (map-set parking-spots
-          { spot-id: spot-id }
-          (merge spot {
-            location: new-location,
-            hourly-rate: new-rate,
-            updated-at: (get-current-time)
-          })
+        (let (
+          (new-location (default-to (get location spot) location))
+          (new-rate (default-to (get hourly-rate spot) hourly-rate))
         )
-        (ok true)
+          ;; Validate new values
+          (asserts! (is-valid-location new-location) ERR-INVALID-INPUT)
+          (asserts! (and (>= new-rate MIN-PARKING-FEE) (<= new-rate MAX-PARKING-FEE)) ERR-INVALID-AMOUNT)
+          
+          (map-set parking-spots
+            { spot-id: spot-id }
+            (merge spot {
+              location: new-location,
+              hourly-rate: new-rate,
+              updated-at: (get-current-time)
+            })
+          )
+          (ok true)
+        )
       )
+      ERR-SPOT-NOT-FOUND
     )
-    ERR-SPOT-NOT-FOUND
   )
 )
 
 ;; Set parking spot status
 (define-public (set-spot-status (spot-id uint) (new-status uint))
-  (match (map-get? parking-spots { spot-id: spot-id })
-    spot
-    (begin
-      (asserts! (is-eq (get owner spot) tx-sender) ERR-NOT-AUTHORIZED)
-      (asserts! (<= new-status STATUS-MAINTENANCE) ERR-INVALID-STATUS)
-      
-      (map-set parking-spots
-        { spot-id: spot-id }
-        (merge spot {
-          status: new-status,
-          updated-at: (get-current-time)
-        })
+  (begin
+    ;; Input validation
+    (asserts! (is-valid-spot-id spot-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-status new-status) ERR-INVALID-STATUS)
+    
+    (match (map-get? parking-spots { spot-id: spot-id })
+      spot
+      (begin
+        (asserts! (is-eq (get owner spot) tx-sender) ERR-NOT-AUTHORIZED)
+        
+        (map-set parking-spots
+          { spot-id: spot-id }
+          (merge spot {
+            status: new-status,
+            updated-at: (get-current-time)
+          })
+        )
+        (ok true)
       )
-      (ok true)
+      ERR-SPOT-NOT-FOUND
     )
-    ERR-SPOT-NOT-FOUND
   )
 )
 
@@ -275,6 +338,8 @@
     (reservation-id (var-get next-reservation-id))
     (current-time (get-current-time))
   )
+    ;; Input validation
+    (asserts! (is-valid-spot-id spot-id) ERR-INVALID-INPUT)
     (asserts! (is-valid-time-range start-time end-time) ERR-INVALID-TIME-RANGE)
     
     (match (map-get? parking-spots { spot-id: spot-id })
@@ -355,105 +420,115 @@
 
 ;; Complete a reservation
 (define-public (complete-reservation (reservation-id uint))
-  (match (map-get? reservations { reservation-id: reservation-id })
-    reservation
-    (match (map-get? parking-spots { spot-id: (get spot-id reservation) })
-      spot
-      (let (
-        (current-time (get-current-time))
-        (owner-payment (- (get total-cost reservation) (get platform-fee reservation)))
-      )
-        (asserts! 
-          (or 
-            (is-eq tx-sender (get renter reservation))
-            (is-eq tx-sender (get owner spot))
-          ) 
-          ERR-NOT-AUTHORIZED
+  (begin
+    ;; Input validation
+    (asserts! (is-valid-reservation-id reservation-id) ERR-INVALID-INPUT)
+    
+    (match (map-get? reservations { reservation-id: reservation-id })
+      reservation
+      (match (map-get? parking-spots { spot-id: (get spot-id reservation) })
+        spot
+        (let (
+          (current-time (get-current-time))
+          (owner-payment (- (get total-cost reservation) (get platform-fee reservation)))
         )
-        (asserts! (is-eq (get status reservation) RESERVATION-ACTIVE) ERR-INVALID-STATUS)
-        (asserts! (>= current-time (get start-time reservation)) ERR-INVALID-TIME-RANGE)
-        
-        ;; Transfer payment to spot owner
-        (try! (as-contract (stx-transfer? owner-payment tx-sender (get owner spot))))
-        
-        ;; Update platform earnings
-        (var-set platform-earnings (+ (var-get platform-earnings) (get platform-fee reservation)))
-        
-        ;; Update reservation
-        (map-set reservations
-          { reservation-id: reservation-id }
-          (merge reservation {
-            status: RESERVATION-COMPLETED,
-            completed-at: (some current-time)
-          })
-        )
-        
-        ;; Update spot
-        (map-set parking-spots
-          { spot-id: (get spot-id reservation) }
-          (merge spot {
-            status: STATUS-AVAILABLE,
-            total-earnings: (+ (get total-earnings spot) owner-payment),
-            updated-at: current-time
-          })
-        )
-        
-        ;; Update owner profile
-        (match (map-get? user-profiles { user: (get owner spot) })
-          owner-profile
-          (map-set user-profiles
-            { user: (get owner spot) }
-            (merge owner-profile {
-              total-earned: (+ (get total-earned owner-profile) owner-payment)
+          (asserts! 
+            (or 
+              (is-eq tx-sender (get renter reservation))
+              (is-eq tx-sender (get owner spot))
+            ) 
+            ERR-NOT-AUTHORIZED
+          )
+          (asserts! (is-eq (get status reservation) RESERVATION-ACTIVE) ERR-INVALID-STATUS)
+          (asserts! (>= current-time (get start-time reservation)) ERR-INVALID-TIME-RANGE)
+          
+          ;; Transfer payment to spot owner
+          (try! (as-contract (stx-transfer? owner-payment tx-sender (get owner spot))))
+          
+          ;; Update platform earnings
+          (var-set platform-earnings (+ (var-get platform-earnings) (get platform-fee reservation)))
+          
+          ;; Update reservation
+          (map-set reservations
+            { reservation-id: reservation-id }
+            (merge reservation {
+              status: RESERVATION-COMPLETED,
+              completed-at: (some current-time)
             })
           )
-          false ;; Should not happen if spot exists
+          
+          ;; Update spot
+          (map-set parking-spots
+            { spot-id: (get spot-id reservation) }
+            (merge spot {
+              status: STATUS-AVAILABLE,
+              total-earnings: (+ (get total-earnings spot) owner-payment),
+              updated-at: current-time
+            })
+          )
+          
+          ;; Update owner profile
+          (match (map-get? user-profiles { user: (get owner spot) })
+            owner-profile
+            (map-set user-profiles
+              { user: (get owner spot) }
+              (merge owner-profile {
+                total-earned: (+ (get total-earned owner-profile) owner-payment)
+              })
+            )
+            false ;; Should not happen if spot exists
+          )
+          
+          (ok true)
         )
-        
-        (ok true)
+        ERR-SPOT-NOT-FOUND
       )
-      ERR-SPOT-NOT-FOUND
+      ERR-RESERVATION-NOT-FOUND
     )
-    ERR-RESERVATION-NOT-FOUND
   )
 )
 
 ;; Cancel a reservation
 (define-public (cancel-reservation (reservation-id uint))
-  (match (map-get? reservations { reservation-id: reservation-id })
-    reservation
-    (match (map-get? parking-spots { spot-id: (get spot-id reservation) })
-      spot
-      (let ((current-time (get-current-time)))
-        (asserts! (is-eq tx-sender (get renter reservation)) ERR-NOT-AUTHORIZED)
-        (asserts! (is-eq (get status reservation) RESERVATION-ACTIVE) ERR-INVALID-STATUS)
-        (asserts! (< current-time (get start-time reservation)) ERR-INVALID-TIME-RANGE)
-        
-        ;; Refund payment (minus a small cancellation fee)
-        (let ((refund-amount (- (get total-cost reservation) (calculate-platform-fee (get total-cost reservation)))))
-          (try! (as-contract (stx-transfer? refund-amount tx-sender (get renter reservation))))
+  (begin
+    ;; Input validation
+    (asserts! (is-valid-reservation-id reservation-id) ERR-INVALID-INPUT)
+    
+    (match (map-get? reservations { reservation-id: reservation-id })
+      reservation
+      (match (map-get? parking-spots { spot-id: (get spot-id reservation) })
+        spot
+        (let ((current-time (get-current-time)))
+          (asserts! (is-eq tx-sender (get renter reservation)) ERR-NOT-AUTHORIZED)
+          (asserts! (is-eq (get status reservation) RESERVATION-ACTIVE) ERR-INVALID-STATUS)
+          (asserts! (< current-time (get start-time reservation)) ERR-INVALID-TIME-RANGE)
+          
+          ;; Refund payment (minus a small cancellation fee)
+          (let ((refund-amount (- (get total-cost reservation) (calculate-platform-fee (get total-cost reservation)))))
+            (try! (as-contract (stx-transfer? refund-amount tx-sender (get renter reservation))))
+          )
+          
+          ;; Update reservation
+          (map-set reservations
+            { reservation-id: reservation-id }
+            (merge reservation { status: RESERVATION-CANCELLED })
+          )
+          
+          ;; Update spot status back to available
+          (map-set parking-spots
+            { spot-id: (get spot-id reservation) }
+            (merge spot {
+              status: STATUS-AVAILABLE,
+              updated-at: current-time
+            })
+          )
+          
+          (ok true)
         )
-        
-        ;; Update reservation
-        (map-set reservations
-          { reservation-id: reservation-id }
-          (merge reservation { status: RESERVATION-CANCELLED })
-        )
-        
-        ;; Update spot status back to available
-        (map-set parking-spots
-          { spot-id: (get spot-id reservation) }
-          (merge spot {
-            status: STATUS-AVAILABLE,
-            updated-at: current-time
-          })
-        )
-        
-        (ok true)
+        ERR-SPOT-NOT-FOUND
       )
-      ERR-SPOT-NOT-FOUND
+      ERR-RESERVATION-NOT-FOUND
     )
-    ERR-RESERVATION-NOT-FOUND
   )
 )
 
@@ -466,7 +541,10 @@
   (comment (optional (string-ascii 200)))
 )
   (begin
-    (asserts! (and (>= rating u1) (<= rating u5)) ERR-INVALID-RATING)
+    ;; Input validation
+    (asserts! (is-valid-spot-id spot-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-rating rating) ERR-INVALID-RATING)
+    (asserts! (is-valid-comment comment) ERR-INVALID-INPUT)
     (asserts! (is-none (map-get? user-ratings { renter: tx-sender, spot-id: spot-id })) ERR-ALREADY-RATED)
     
     ;; Verify user has completed a reservation for this spot
@@ -509,45 +587,51 @@
   (reservation-id uint) 
   (reason (string-ascii 200))
 )
-  (match (map-get? reservations { reservation-id: reservation-id })
-    reservation
-    (let (
-      (dispute-id (var-get next-dispute-id))
-      (current-time (get-current-time))
+  (begin
+    ;; Input validation
+    (asserts! (is-valid-reservation-id reservation-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-reason reason) ERR-INVALID-INPUT)
+    
+    (match (map-get? reservations { reservation-id: reservation-id })
+      reservation
+      (let (
+        (dispute-id (var-get next-dispute-id))
+        (current-time (get-current-time))
+      )
+        (asserts! (is-eq tx-sender (get renter reservation)) ERR-NOT-AUTHORIZED)
+        (asserts! 
+          (< current-time (+ (get end-time reservation) DISPUTE-WINDOW-BLOCKS))
+          ERR-DISPUTE-WINDOW-CLOSED
+        )
+        
+        ;; Create dispute record
+        (map-set disputes
+          { dispute-id: dispute-id }
+          {
+            reservation-id: reservation-id,
+            complainant: tx-sender,
+            reason: reason,
+            status: u0, ;; Open
+            resolution: none,
+            created-at: current-time,
+            resolved-at: none
+          }
+        )
+        
+        ;; Update reservation status
+        (map-set reservations
+          { reservation-id: reservation-id }
+          (merge reservation {
+            status: RESERVATION-DISPUTED,
+            dispute-reason: (some reason)
+          })
+        )
+        
+        (var-set next-dispute-id (+ dispute-id u1))
+        (ok dispute-id)
+      )
+      ERR-RESERVATION-NOT-FOUND
     )
-      (asserts! (is-eq tx-sender (get renter reservation)) ERR-NOT-AUTHORIZED)
-      (asserts! 
-        (< current-time (+ (get end-time reservation) DISPUTE-WINDOW-BLOCKS))
-        ERR-DISPUTE-WINDOW-CLOSED
-      )
-      
-      ;; Create dispute record
-      (map-set disputes
-        { dispute-id: dispute-id }
-        {
-          reservation-id: reservation-id,
-          complainant: tx-sender,
-          reason: reason,
-          status: u0, ;; Open
-          resolution: none,
-          created-at: current-time,
-          resolved-at: none
-        }
-      )
-      
-      ;; Update reservation status
-      (map-set reservations
-        { reservation-id: reservation-id }
-        (merge reservation {
-          status: RESERVATION-DISPUTED,
-          dispute-reason: (some reason)
-        })
-      )
-      
-      (var-set next-dispute-id (+ dispute-id u1))
-      (ok dispute-id)
-    )
-    ERR-RESERVATION-NOT-FOUND
   )
 )
 
@@ -619,7 +703,10 @@
   (resolution (string-ascii 200))
 )
   (begin
+    ;; Input validation
     (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (is-valid-dispute-id dispute-id) ERR-INVALID-INPUT)
+    (asserts! (> (len resolution) u0) ERR-INVALID-INPUT)
     
     (match (map-get? disputes { dispute-id: dispute-id })
       dispute
